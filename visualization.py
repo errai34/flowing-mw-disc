@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 Visualization functions for normalizing flow analysis of Galactic evolution.
-Creates publication-quality figures similar to those in the paper.
+Simplified for minimal design and direct plotting.
 """
 
 import os
 
-import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -18,16 +17,13 @@ def plot_bin_chemical_distribution(
     scaler,
     bin_name,
     save_dir=None,
-    age_range=(0, 14),
+    age_range=(0, 20),
     feh_range=(-1.0, 0.5),
     mgfe_range=(0.0, 0.4),
-    grid_resolution=50,
+    n_samples=10000,
 ):
     """
-    Plot the 2D distributions of:
-    1. Age vs. [Fe/H]
-    2. Age vs. [Mg/Fe]
-    3. [Fe/H] vs. [Mg/Fe]
+    Simple scatter plots of Age vs. [Fe/H] and Age vs. [Mg/Fe].
 
     Parameters:
     -----------
@@ -41,98 +37,61 @@ def plot_bin_chemical_distribution(
         Directory to save figure
     age_range, feh_range, mgfe_range : tuple
         (min, max) for each parameter range
-    grid_resolution : int
-        Resolution of the grid for density evaluation
+    n_samples : int
+        Number of samples to draw
     """
     device = next(flow.parameters()).device
     flow.eval()
 
-    # Create grids for each pair of parameters
-    age_grid = np.linspace(age_range[0], age_range[1], grid_resolution)
-    feh_grid = np.linspace(feh_range[0], feh_range[1], grid_resolution)
-    mgfe_grid = np.linspace(mgfe_range[0], mgfe_range[1], grid_resolution)
+    # Sample from the flow
+    with torch.no_grad():
+        samples = flow.sample(n_samples).cpu().numpy()
 
-    # Convert age to log scale for the model
-    log_age_grid = np.log10(np.maximum(age_grid, 0.1))
+    # Inverse transform to get original scale
+    samples_original = scaler.inverse_transform(samples)
 
-    # Create figure
-    fig = plt.figure(figsize=(15, 5))
-    gs = gridspec.GridSpec(1, 3, width_ratios=[1, 1, 1])
+    # Extract parameters
+    log_ages = samples_original[:, 0]  # First dimension is log(age)
+    fehs = samples_original[:, 1]  # Second dimension is [Fe/H]
+    mgfes = samples_original[:, 2]  # Third dimension is [Mg/Fe]
 
-    # 1. Age vs. [Fe/H]
-    ax1 = plt.subplot(gs[0])
-    density_age_feh = compute_2d_density(
-        flow,
-        scaler,
-        log_age_grid,
-        feh_grid,
-        0,
-        1,
-        fixed_values={"mgfe": 0.1, "jz": 0.0, "lz": 1000.0},
-        device=device,
+    # Convert log age to linear age for plotting
+    ages = 10**log_ages
+
+    # Filter points within the specified ranges
+    mask = (
+        (ages >= age_range[0])
+        & (ages <= age_range[1])
+        & (fehs >= feh_range[0])
+        & (fehs <= feh_range[1])
+        & (mgfes >= mgfe_range[0])
+        & (mgfes <= mgfe_range[1])
     )
-    im1 = ax1.imshow(
-        density_age_feh.T,
-        origin="lower",
-        aspect="auto",
-        extent=[age_range[0], age_range[1], feh_range[0], feh_range[1]],
-        cmap="viridis",
-    )
-    ax1.set_title(f"{bin_name}: Age vs. [Fe/H]")
+
+    # Create a figure with two subplots side by side
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Plot 1: Age vs [Fe/H]
+    ax1.scatter(ages[mask], fehs[mask], s=3, alpha=0.6, color="blue")
     ax1.set_xlabel("Age (Gyr)")
     ax1.set_ylabel("[Fe/H]")
-    plt.colorbar(im1, ax=ax1)
+    ax1.set_title(f"{bin_name}: Age vs. [Fe/H]")
+    ax1.set_xlim(age_range[1], age_range[0])  # Reversed to show oldest stars on left
+    ax1.set_ylim(feh_range)
+    ax1.grid(True, alpha=0.3)
 
-    # 2. Age vs. [Mg/Fe]
-    ax2 = plt.subplot(gs[1])
-    density_age_mgfe = compute_2d_density(
-        flow,
-        scaler,
-        log_age_grid,
-        mgfe_grid,
-        0,
-        2,
-        fixed_values={"feh": 0.0, "jz": 0.0, "lz": 1000.0},
-        device=device,
-    )
-    im2 = ax2.imshow(
-        density_age_mgfe.T,
-        origin="lower",
-        aspect="auto",
-        extent=[age_range[0], age_range[1], mgfe_range[0], mgfe_range[1]],
-        cmap="viridis",
-    )
-    ax2.set_title(f"{bin_name}: Age vs. [Mg/Fe]")
+    # Plot 2: Age vs [Mg/Fe]
+    ax2.scatter(ages[mask], mgfes[mask], s=3, alpha=0.6, color="green")
     ax2.set_xlabel("Age (Gyr)")
     ax2.set_ylabel("[Mg/Fe]")
-    plt.colorbar(im2, ax=ax2)
-
-    # 3. [Fe/H] vs. [Mg/Fe]
-    ax3 = plt.subplot(gs[2])
-    density_feh_mgfe = compute_2d_density(
-        flow,
-        scaler,
-        feh_grid,
-        mgfe_grid,
-        1,
-        2,
-        fixed_values={"age": 10.0, "jz": 0.0, "lz": 1000.0},
-        device=device,
-    )
-    im3 = ax3.imshow(
-        density_feh_mgfe.T,
-        origin="lower",
-        aspect="auto",
-        extent=[feh_range[0], feh_range[1], mgfe_range[0], mgfe_range[1]],
-        cmap="viridis",
-    )
-    ax3.set_title(f"{bin_name}: [Fe/H] vs. [Mg/Fe]")
-    ax3.set_xlabel("[Fe/H]")
-    ax3.set_ylabel("[Mg/Fe]")
-    plt.colorbar(im3, ax=ax3)
+    ax2.set_title(f"{bin_name}: Age vs. [Mg/Fe]")
+    ax2.set_xlim(age_range[1], age_range[0])  # Reversed to show oldest stars on left
+    ax2.set_ylim(mgfe_range)
+    ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
 
+    # Save figure
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
         plt.savefig(
@@ -173,25 +132,22 @@ def compute_2d_density(flow, scaler, grid1, grid2, idx1, idx2, fixed_values, dev
     param_names = ["age", "feh", "mgfe", "jz", "lz"]
     param_idx = {name: i for i, name in enumerate(param_names)}
 
-    # Initialize density array
-    density = np.zeros((len(grid1), len(grid2)))
-
-    # Create grid for evaluation
+    # Create meshgrid for the two parameters
     X, Y = np.meshgrid(grid1, grid2)
+
+    # Reshape to get all combinations
     points = np.zeros((len(grid1) * len(grid2), 5))
 
-    # Set fixed values for all dimensions
+    # Set fixed values for all dimensions first
     for name, value in fixed_values.items():
         idx = param_idx[name]
         points[:, idx] = value
 
-    # Set values for the two dimensions we're plotting
-    flat_X = X.flatten()
-    flat_Y = Y.flatten()
-    points[:, idx1] = flat_X
-    points[:, idx2] = flat_Y
+    # Set the grid values for the two dimensions we're plotting
+    points[:, idx1] = X.flatten()
+    points[:, idx2] = Y.flatten()
 
-    # Scale points
+    # Scale points using the provided scaler
     scaled_points = scaler.transform(points)
     tensor_points = torch.tensor(scaled_points, dtype=torch.float32, device=device)
 
@@ -199,15 +155,23 @@ def compute_2d_density(flow, scaler, grid1, grid2, idx1, idx2, fixed_values, dev
     with torch.no_grad():
         log_probs = flow.log_prob(tensor_points).cpu().numpy()
 
-    # Convert to probability density
-    probs = np.exp(log_probs)
+    # Convert to probability density (use exp but handle numerical issues)
+    # Subtract max for numerical stability
+    log_probs_shifted = log_probs - np.max(log_probs)
+    probs = np.exp(log_probs_shifted)
 
-    # Reshape to 2D grid
-    density = probs.reshape(len(grid2), len(grid1)).T
+    # Reshape to match the original 2D grid dimensions
+    # Note: reshaping with the correct dimensions - Y corresponds to rows (grid2)
+    density = probs.reshape(len(grid2), len(grid1))
 
-    # Normalize density
-    if np.sum(density) > 0:
-        density = density / np.sum(density)
+    # Apply a small amount of smoothing for better visualization
+    from scipy.ndimage import gaussian_filter
+
+    density = gaussian_filter(density, sigma=0.7)
+
+    # Normalize density to [0, 1] range for visualization
+    if np.max(density) - np.min(density) > 0:
+        density = (density - np.min(density)) / (np.max(density) - np.min(density))
 
     return density
 
@@ -215,6 +179,7 @@ def compute_2d_density(flow, scaler, grid1, grid2, idx1, idx2, fixed_values, dev
 def plot_radial_bin_comparison(flows_dict, scalers_dict, save_path=None):
     """
     Create a master figure showing age-[Fe/H] distributions across different radial bins.
+    Uses scatter plots instead of density plots.
 
     Parameters:
     -----------
@@ -225,51 +190,48 @@ def plot_radial_bin_comparison(flows_dict, scalers_dict, save_path=None):
     save_path : str
         Path to save the figure
     """
-    # Get device from first flow
-    device = next(iter(flows_dict.values())).parameters().__next__().device
-
-    # Define grid parameters
-    age_grid = np.linspace(1, 14, 50)
-    log_age_grid = np.log10(age_grid)
-    feh_grid = np.linspace(-1.0, 0.5, 50)
-
     # Set up figure
     n_bins = len(flows_dict)
-    fig, axes = plt.subplots(1, n_bins, figsize=(5 * n_bins, 5))
+    fig, axes = plt.subplots(
+        1, n_bins, figsize=(5 * n_bins, 5), sharex=True, sharey=True
+    )
     if n_bins == 1:
         axes = [axes]
 
     # Plot each bin
     for i, (bin_name, flow) in enumerate(flows_dict.items()):
+        device = next(flow.parameters()).device
         flow.eval()
         scaler = scalers_dict[bin_name]
 
-        # Compute density
-        density = compute_2d_density(
-            flow,
-            scaler,
-            log_age_grid,
-            feh_grid,
-            0,
-            1,
-            fixed_values={"mgfe": 0.1, "jz": 0.0, "lz": 1000.0},
-            device=device,
-        )
+        # Sample from the flow
+        with torch.no_grad():
+            samples = flow.sample(3000).cpu().numpy()
+
+        # Inverse transform to get original scale
+        samples_original = scaler.inverse_transform(samples)
+
+        # Extract age and [Fe/H]
+        log_ages = samples_original[:, 0]
+        fehs = samples_original[:, 1]
+
+        # Convert log age to linear age
+        ages = 10**log_ages
+
+        # Filter points within ranges
+        mask = (ages >= 0) & (ages <= 20) & (fehs >= -1.0) & (fehs <= 0.5)
 
         # Plot
-        im = axes[i].imshow(
-            density,
-            origin="lower",
-            aspect="auto",
-            extent=[1, 14, -1.0, 0.5],
-            cmap="viridis",
-        )
+        axes[i].scatter(ages[mask], fehs[mask], s=3, alpha=0.6, color="blue")
         axes[i].set_title(f"Bin: {bin_name}")
         axes[i].set_xlabel("Age (Gyr)")
         if i == 0:
             axes[i].set_ylabel("[Fe/H]")
 
-        plt.colorbar(im, ax=axes[i])
+        # Set axis limits - age from 20 to 0 (reversed)
+        axes[i].set_xlim(20, 0)
+        axes[i].set_ylim(-1.0, 0.5)
+        axes[i].grid(True, alpha=0.3)
 
     plt.suptitle("Age-Metallicity Relation Across Radial Bins", fontsize=16)
     plt.tight_layout()
@@ -510,19 +472,14 @@ def plot_age_metallicity_scatter(
         & (fehs <= feh_range[1])
     )
 
-    scatter = ax.scatter(
+    # Simple scatter plot
+    ax.scatter(
         ages[mask],
         fehs[mask],
         alpha=0.6,
-        s=15,
-        c=ages[mask],
-        cmap="viridis",
-        edgecolors="none",
+        s=3,
+        color="blue",
     )
-
-    # Add colorbar for age
-    cbar = plt.colorbar(scatter, ax=ax)
-    cbar.set_label("Age (Gyr)")
 
     # Set labels and title
     ax.set_ylabel("[Fe/H]")
@@ -530,15 +487,18 @@ def plot_age_metallicity_scatter(
     ax.set_title("Age-Metallicity Relation from Flow Model Samples")
 
     # Set axis ranges
-    ax.set_ylim(-1, 0.5)
-    ax.set_xlim(20, 0)
+    ax.set_ylim(feh_range)
+    ax.set_xlim(age_range[1], age_range[0])  # Reversed to show oldest stars on left
 
     # Add grid
-    ax.grid(True, linestyle="--", alpha=0.7)
+    ax.grid(True, linestyle="--", alpha=0.3)
 
     # Save figure if path provided
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+    else:
+        plt.show()
 
     return fig, ax
 
@@ -616,32 +576,28 @@ def plot_multiple_bin_age_metallicity(
         )
 
         # Create scatter plot
-        scatter = axes[i].scatter(
+        axes[i].scatter(
             ages[mask],
             fehs[mask],
             alpha=0.6,
-            s=15,
-            c=ages[mask],
-            cmap="viridis",
-            edgecolors="none",
+            s=3,
+            color="blue",
         )
 
         # Set title and labels
         axes[i].set_title(f"Bin: {bin_name}")
         if i == 0:
             axes[i].set_ylabel("[Fe/H] (dex)")
-        axes[i].set_xlabel("Age")
+        axes[i].set_xlabel("Age (Gyr)")
 
         # Set axis ranges
-        axes[i].set_ylim(-1, 0.5)
-        axes[i].set_xlim(20, 0)
+        axes[i].set_ylim(feh_range)
+        axes[i].set_xlim(
+            age_range[1], age_range[0]
+        )  # Reversed to show oldest stars on left
 
         # Add grid
-        axes[i].grid(True, linestyle="--", alpha=0.7)
-
-    # Add colorbar for the last plot
-    cbar = fig.colorbar(scatter, ax=axes[-1])
-    cbar.set_label("Age (Gyr)")
+        axes[i].grid(True, linestyle="--", alpha=0.3)
 
     plt.suptitle("Age-Metallicity Relation Across Radial Bins", fontsize=16)
     plt.tight_layout()
@@ -649,5 +605,8 @@ def plot_multiple_bin_age_metallicity(
     # Save figure if path provided
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+    else:
+        plt.show()
 
     return fig
