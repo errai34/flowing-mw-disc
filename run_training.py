@@ -24,14 +24,40 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 
+def format_bin_name(bin_range):
+    """
+    Format bin name to ensure consistent naming with decimal points.
+    Converts '0-6' to 'R0.0-6.0'
+    """
+    r_min, r_max = map(float, bin_range.split("-"))
+    return f"R{r_min:.1f}-{r_max:.1f}"
+
+
 def main(args):
     """Main function to run the training."""
     print("Starting improved density deconvolution training...")
 
-    # Create output directory
+    # Create models directory if it doesn't exist
+    models_dir = os.path.join(args.output_dir, "models")
+    os.makedirs(models_dir, exist_ok=True)
+    
+    # Create plots directory
+    plots_dir = os.path.join(args.output_dir, "plots")
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    # Create run directory for logs
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = os.path.join(args.output_dir, f"run_{timestamp}")
-    os.makedirs(output_dir, exist_ok=True)
+    run_dir = os.path.join(args.output_dir, f"run_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+
+    # Format bin name consistently with decimal points
+    formatted_bin_name = args.bin_name
+    if "-" in args.bin_name and not args.bin_name.startswith("R"):
+        formatted_bin_name = format_bin_name(args.bin_name)
+    elif "-" in args.bin_name and args.bin_name.startswith("R"):
+        # Extract the range part without 'R'
+        range_part = args.bin_name[1:]
+        formatted_bin_name = format_bin_name(range_part)
 
     # Save configuration
     config = {
@@ -50,9 +76,10 @@ def main(args):
             "mc_samples": args.mc_samples,
             "use_importance_weighted": args.use_iwae,
         },
+        "bin_name": formatted_bin_name
     }
 
-    with open(os.path.join(output_dir, "config.yaml"), "w") as f:
+    with open(os.path.join(run_dir, "config.yaml"), "w") as f:
         yaml.dump(config, f)
 
     # Load data
@@ -77,22 +104,46 @@ def main(args):
             print(f"Using subset of {len(filtered_mw)} stars for training")
 
         # Prepare data for radial bins
-        bin_ranges = []
+        formatted_bin_ranges = []
+        original_to_formatted = {}
+        
         for bin_range in args.bin_ranges:
-            r_min, r_max = map(float, bin_range.split("-"))
+            formatted = format_bin_name(bin_range)
+            formatted_bin_ranges.append(formatted)
+            original_to_formatted[bin_range] = formatted
+            
+            # Also map Rbin-range format to formatted
+            if "-" in bin_range:
+                r_bin = f"R{bin_range}"
+                original_to_formatted[r_bin] = formatted
+
+        # Find the formatted bin name from the original args.bin_name
+        if args.bin_name in original_to_formatted:
+            formatted_bin_name = original_to_formatted[args.bin_name]
+        
+        # Convert ranges to actual numeric values
+        bin_ranges = []
+        for bin_name in formatted_bin_ranges:
+            # Extract min and max from formatted name (remove 'R' prefix and convert to float)
+            r_min, r_max = map(float, bin_name[1:].split("-"))
             bin_ranges.append((r_min, r_max))
 
         bin_data = prepare_data_for_radial_bins(filtered_mw, bin_ranges)
+        
+        # Map bin data keys to formatted names
+        formatted_bin_data = {}
+        for i, (old_key, value) in enumerate(bin_data.items()):
+            formatted_bin_data[formatted_bin_ranges[i]] = value
 
         # Train model for selected bin
-        if args.bin_name not in bin_data:
+        if formatted_bin_name not in formatted_bin_data:
             print(
-                f"Bin {args.bin_name} not found. Available bins: {list(bin_data.keys())}"
+                f"Bin {formatted_bin_name} not found. Available bins: {list(formatted_bin_data.keys())}"
             )
             return
 
-        bin_info = bin_data[args.bin_name]
-        print(f"Training model for bin {args.bin_name} with {bin_info['count']} stars")
+        bin_info = formatted_bin_data[formatted_bin_name]
+        print(f"Training model for bin {formatted_bin_name} with {bin_info['count']} stars")
 
         # Get data and errors
         data = bin_info["data"]
@@ -134,10 +185,6 @@ def main(args):
             weight_decay=args.weight_decay,
         )
 
-        # Training loop
-        bin_output_dir = os.path.join(output_dir, args.bin_name)
-        os.makedirs(bin_output_dir, exist_ok=True)
-
         # Import the custom training function with modifications
         from main import train_flow_model
 
@@ -152,15 +199,15 @@ def main(args):
             weight_decay=args.weight_decay,
             mc_samples=args.mc_samples,
             use_importance_weighted=args.use_iwae,
-            output_dir=bin_output_dir,
-            pretrain_epochs=args.pretraining_epochs,  # Add this parameter
+            output_dir=run_dir,  # Store training progress in run dir
+            pretrain_epochs=args.pretraining_epochs,
         )
 
-        # Save trained model
-        model_path = os.path.join(bin_output_dir, f"{args.bin_name}_model.pt")
+        # Save trained model to the centralized models directory
+        model_path = os.path.join(models_dir, f"{formatted_bin_name}_model.pt")
         torch.save(
             {
-                "flow_state": flow.state_dict(),
+                "model_state": flow.state_dict(),
                 "recognition_state": recognition_net.state_dict(),
                 "scaler": scaler,
                 "stats": stats,
@@ -174,12 +221,18 @@ def main(args):
         plot_bin_chemical_distribution(
             flow=flow,
             scaler=scaler,
-            bin_name=args.bin_name,
-            save_dir=os.path.join(output_dir, "plots"),
+            bin_name=formatted_bin_name,
+            save_dir=plots_dir,
             age_range=(0, 14),
             feh_range=(-1.0, 0.5),
             mgfe_range=(0.0, 0.4),
         )
+
+        # Save symlink to model in run directory for reference
+        run_model_path = os.path.join(run_dir, f"{formatted_bin_name}_model.pt")
+        if os.path.exists(run_model_path):
+            os.remove(run_model_path)
+        os.symlink(model_path, run_model_path)
 
         print("Training and visualization complete!")
 

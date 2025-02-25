@@ -248,8 +248,8 @@ def train_flow_model(
 
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    # Create plots directory
-    plots_dir = os.path.join(os.path.dirname(output_dir), "plots")
+    # Create plots directory within the run directory
+    plots_dir = os.path.join(output_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
 
     # Training loop

@@ -420,7 +420,7 @@ def generate_visualizations(
     os.makedirs(heatmap_dir, exist_ok=True)
 
     # Define bin order to ensure correct ordering from inner to outer
-    radial_bin_order = ["R0-6", "R6-8", "R8-10", "R10-15"]
+    radial_bin_order = ["R0.0-6.0", "R6.0-8.0", "R8.0-10.0", "R10.0-15.0"]
 
     # Generate individual visualizations in the correct order
     for bin_name in radial_bin_order:
@@ -481,15 +481,20 @@ def load_models(models_dir):
 
     # Define the order of radial bins
     # This will ensure bins are processed in the correct order from inner to outer
-    radial_bin_order = ["R0-6", "R6-8", "R8-10", "R10-15"]
+    radial_bin_order = ["R0.0-6.0", "R6.0-8.0", "R8.0-10.0", "R10.0-15.0"]
+    
+    # Create a set for faster lookups
+    radial_bins_set = set(radial_bin_order)
 
     # Find all model files
     model_files = {}
     for filename in os.listdir(models_dir):
         if filename.endswith("_model.pt"):
             bin_name = filename.split("_model.pt")[0]
-            model_path = os.path.join(models_dir, filename)
-            model_files[bin_name] = model_path
+            # Ensure bin name follows our standard format and is one we're interested in
+            if bin_name in radial_bins_set:
+                model_path = os.path.join(models_dir, filename)
+                model_files[bin_name] = model_path
 
     # Load models in the specified order
     for bin_name in radial_bin_order:
@@ -526,27 +531,67 @@ if __name__ == "__main__":
         description="Generate age-metallicity visualizations from trained models"
     )
     parser.add_argument(
-        "--models_dir", type=str, required=True, help="Directory containing model files"
+        "--models_dir", 
+        type=str, 
+        default="outputs/models", 
+        help="Directory containing model files"
     )
     parser.add_argument(
-        "--output_dir", type=str, default="outputs", help="Output directory"
+        "--output_dir", 
+        type=str, 
+        default="outputs/visualizations", 
+        help="Output directory for visualizations"
     )
     parser.add_argument(
-        "--samples", type=int, default=10000, help="Number of samples per model"
-    )
-    parser.add_argument("--min_age", type=float, default=0, help="Minimum age to plot")
-    parser.add_argument("--max_age", type=float, default=20, help="Maximum age to plot")
-    parser.add_argument(
-        "--min_feh", type=float, default=-1.5, help="Minimum [Fe/H] to plot"
+        "--samples", 
+        type=int, 
+        default=10000, 
+        help="Number of samples per model"
     )
     parser.add_argument(
-        "--max_feh", type=float, default=0.5, help="Maximum [Fe/H] to plot"
+        "--min_age", 
+        type=float, 
+        default=0, 
+        help="Minimum age to plot"
+    )
+    parser.add_argument(
+        "--max_age", 
+        type=float, 
+        default=20, 
+        help="Maximum age to plot"
+    )
+    parser.add_argument(
+        "--min_feh", 
+        type=float, 
+        default=-1.5, 
+        help="Minimum [Fe/H] to plot"
+    )
+    parser.add_argument(
+        "--max_feh", 
+        type=float, 
+        default=0.5, 
+        help="Maximum [Fe/H] to plot"
     )
 
     args = parser.parse_args()
 
+    # Ensure models directory exists
+    if not os.path.exists(args.models_dir):
+        print(f"Error: Models directory '{args.models_dir}' does not exist.")
+        print("Please specify the correct directory with --models_dir or run training first.")
+        exit(1)
+
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+
     # Load models
     flows_dict, scalers_dict = load_models(args.models_dir)
+    
+    if not flows_dict:
+        print("No valid models found. Please check the models directory.")
+        exit(1)
+        
+    print(f"Successfully loaded {len(flows_dict)} models: {list(flows_dict.keys())}")
 
     # Generate visualizations
     generate_visualizations(
