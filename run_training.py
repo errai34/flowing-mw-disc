@@ -211,6 +211,11 @@ def main(args):
                 "recognition_state": recognition_net.state_dict(),
                 "scaler": scaler,
                 "stats": stats,
+                "model_config": {
+                    "n_transforms": args.n_transforms,
+                    "hidden_dims": [args.hidden_dim, args.hidden_dim],
+                    "num_bins": args.num_bins,
+                }
             },
             model_path,
         )

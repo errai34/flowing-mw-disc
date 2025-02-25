@@ -167,8 +167,27 @@ def plot_multiple_bin_kde(
     fig : matplotlib.figure.Figure
         Figure object
     """
+    # Check if we have any models
+    if not flows_dict:
+        print("No models available for combined visualization")
+        return None
+        
+    # Define bin order to ensure correct ordering from inner to outer
+    radial_bin_order = ["R0.0-6.0", "R6.0-8.0", "R8.0-10.0", "R10.0-15.0"]
+    
+    # Filter bin order to only include available models
+    available_bins = []
+    for bin_name in radial_bin_order:
+        if bin_name in flows_dict and bin_name in scalers_dict:
+            available_bins.append(bin_name)
+    
+    # If no bins are available, return None
+    if not available_bins:
+        print("No valid models available for comparison")
+        return None
+        
     # Set up figure
-    n_bins = len(flows_dict)
+    n_bins = len(available_bins)
     fig, axes = plt.subplots(
         1, n_bins, figsize=(5 * n_bins, 5), sharex=True, sharey=True
     )
@@ -177,13 +196,9 @@ def plot_multiple_bin_kde(
     if n_bins == 1:
         axes = [axes]
 
-    # Define bin order to ensure correct ordering from inner to outer
-    radial_bin_order = ["R0-6", "R6-8", "R8-10", "R10-15"]
-
     # Plot each bin in the correct order
-    for i, bin_name in enumerate(radial_bin_order):
-        if bin_name in flows_dict:
-            flow = flows_dict[bin_name]
+    for i, bin_name in enumerate(available_bins):
+        flow = flows_dict[bin_name]
         device = next(flow.parameters()).device
         flow.eval()
         scaler = scalers_dict[bin_name]
@@ -424,35 +439,37 @@ def generate_visualizations(
 
     # Generate individual visualizations in the correct order
     for bin_name in radial_bin_order:
-        if bin_name in flows_dict:
+        if bin_name in flows_dict and bin_name in scalers_dict:
             flow = flows_dict[bin_name]
-        scaler = scalers_dict[bin_name]
-        print(f"Generating visualizations for {bin_name}...")
+            scaler = scalers_dict[bin_name]
+            print(f"Generating visualizations for {bin_name}...")
 
-        # KDE plots
-        plot_age_metallicity_kde(
-            flow,
-            scaler,
-            n_samples=n_samples,
-            save_path=os.path.join(kde_dir, f"{bin_name}_age_feh_kde.png"),
-            age_range=age_range,
-            feh_range=feh_range,
-            flip_age_axis=True,
-            bin_name=bin_name,
-        )
+            # KDE plots
+            plot_age_metallicity_kde(
+                flow,
+                scaler,
+                n_samples=n_samples,
+                save_path=os.path.join(kde_dir, f"{bin_name}_age_feh_kde.png"),
+                age_range=age_range,
+                feh_range=feh_range,
+                flip_age_axis=True,
+                bin_name=bin_name,
+            )
 
-        # Heatmap plots
-        plot_age_metallicity_heatmap(
-            flow,
-            scaler,
-            n_samples=n_samples,
-            save_path=os.path.join(heatmap_dir, f"{bin_name}_age_feh_heatmap.png"),
-            age_range=age_range,
-            feh_range=feh_range,
-            nbins=(100, 100),
-            flip_age_axis=True,
-            bin_name=bin_name,
-        )
+            # Heatmap plots
+            plot_age_metallicity_heatmap(
+                flow,
+                scaler,
+                n_samples=n_samples,
+                save_path=os.path.join(heatmap_dir, f"{bin_name}_age_feh_heatmap.png"),
+                age_range=age_range,
+                feh_range=feh_range,
+                nbins=(100, 100),
+                flip_age_axis=True,
+                bin_name=bin_name,
+            )
+        else:
+            print(f"Skipping bin {bin_name}: model or scaler not available")
 
     # Generate combined comparison plots
     plot_multiple_bin_kde(
@@ -503,22 +520,43 @@ def load_models(models_dir):
             print(f"Loading model for bin {bin_name} from {model_path}")
             checkpoint = torch.load(model_path, map_location=device)
 
-            # Initialize flow model
-            flow = Flow5D().to(device)
-
-            # Check which format the model was saved in
-            if "flow_state" in checkpoint:
-                flow.load_state_dict(checkpoint["flow_state"])
-            elif "model_state" in checkpoint:
-                flow.load_state_dict(checkpoint["model_state"])
+            # Initialize flow model with matching parameters from the model
+            if "model_config" in checkpoint:
+                # If we saved the configuration
+                config = checkpoint["model_config"] 
+                flow = Flow5D(
+                    n_transforms=config.get("n_transforms", 12),
+                    hidden_dims=config.get("hidden_dims", [128, 128]),
+                    num_bins=config.get("num_bins", 24)
+                ).to(device)
             else:
-                print(f"Warning: Unknown model format in {model_path}")
+                # Use default configuration matching what we used in training
+                flow = Flow5D(
+                    n_transforms=12,
+                    hidden_dims=[128, 128],
+                    num_bins=24
+                ).to(device)
+
+            try:
+                # Check which format the model was saved in
+                if "flow_state" in checkpoint:
+                    flow.load_state_dict(checkpoint["flow_state"])
+                elif "model_state" in checkpoint:
+                    flow.load_state_dict(checkpoint["model_state"])
+                else:
+                    print(f"Warning: Unknown model format in {model_path}")
+                    continue
+                
+                flow.eval()
+                flows_dict[bin_name] = flow
+                scalers_dict[bin_name] = checkpoint["scaler"]
+                print(f"Successfully loaded model for {bin_name}")
+                
+            except RuntimeError as e:
+                print(f"Error loading model for {bin_name}: {e}")
+                print("The model architecture in the file may not match the current Flow5D implementation.")
+                print("Skipping this model.")
                 continue
-
-            flow.eval()
-
-            flows_dict[bin_name] = flow
-            scalers_dict[bin_name] = checkpoint["scaler"]
 
     print(f"Loaded {len(flows_dict)} models")
     return flows_dict, scalers_dict
