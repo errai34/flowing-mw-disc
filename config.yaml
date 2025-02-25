@@ -1,0 +1,33 @@
+# Data paths for your specific directory structure
+apogee_path: "/Users/iciuca/Desktop/Research/ResearchData/APOGEE_DR17"
+galah_path: "/Users/iciuca/Desktop/Research/ResearchData/GALAH_DR4"
+
+# Model parameters
+flow:
+  n_transforms: 16
+  hidden_dims: [128, 128]
+  n_bins: 16
+  tail_bound: 5.0
+
+# Training parameters
+training:
+  batch_size: 256
+  n_epochs: 100
+  lr: 1e-3
+  weight_decay: 1e-5
+  mc_samples: 10
+  patience: 5
+
+# Analysis parameters
+analysis:
+  age_values: [2, 4, 6, 8, 10, 12]
+  feh_range: [-1.0, 0.5, 100]
+  mgfe_range: [0.0, 0.4, 100]
+  grid_resolution: 50
+
+# Radial bins
+radial_bins:
+  - [0, 6]   # Inner disc
+  - [6, 8]   # Inner-middle disc
+  - [8, 10]  # Solar neighborhood
+  - [10, 15] # Outer disc
