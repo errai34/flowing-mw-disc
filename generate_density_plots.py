@@ -42,6 +42,8 @@ def plot_age_metallicity_kde(
         Figure size
     flip_age_axis : bool
         If True, plot age from high to low (oldest to youngest on the left)
+        This means the x-axis will be inverted so that older stars (e.g., 15 Gyr)
+        appear on the left side and younger stars (e.g., 5 Gyr) appear on the right.
     cmap : str
         Colormap to use for density visualization
     point_size : float
@@ -171,21 +173,21 @@ def plot_multiple_bin_kde(
     if not flows_dict:
         print("No models available for combined visualization")
         return None
-        
+
     # Define bin order to ensure correct ordering from inner to outer
     radial_bin_order = ["R0.0-6.0", "R6.0-8.0", "R8.0-10.0", "R10.0-15.0"]
-    
+
     # Filter bin order to only include available models
     available_bins = []
     for bin_name in radial_bin_order:
         if bin_name in flows_dict and bin_name in scalers_dict:
             available_bins.append(bin_name)
-    
+
     # If no bins are available, return None
     if not available_bins:
         print("No valid models available for comparison")
         return None
-        
+
     # Set up figure
     n_bins = len(available_bins)
     fig, axes = plt.subplots(
@@ -421,7 +423,8 @@ def generate_visualizations(
     n_samples : int
         Number of samples to draw per model
     age_range : tuple
-        (min, max) for age range
+        (min, max) for age range in Gyr. Note that if flip_age_axis=True, older ages (e.g., 15 Gyr)
+        will appear on the left side of the plot, and younger ages (e.g., 5 Gyr) on the right
     feh_range : tuple
         (min, max) for [Fe/H] range
     """
@@ -433,6 +436,9 @@ def generate_visualizations(
     os.makedirs(viz_dir, exist_ok=True)
     os.makedirs(kde_dir, exist_ok=True)
     os.makedirs(heatmap_dir, exist_ok=True)
+    
+    print(f"Generating visualizations with age range: {age_range} Gyr")
+    print(f"Note: With flip_age_axis=True, older ages will appear on the LEFT side of plots")
 
     # Define bin order to ensure correct ordering from inner to outer
     radial_bin_order = ["R0.0-6.0", "R6.0-8.0", "R8.0-10.0", "R10.0-15.0"]
@@ -499,7 +505,7 @@ def load_models(models_dir):
     # Define the order of radial bins
     # This will ensure bins are processed in the correct order from inner to outer
     radial_bin_order = ["R0.0-6.0", "R6.0-8.0", "R8.0-10.0", "R10.0-15.0"]
-    
+
     # Create a set for faster lookups
     radial_bins_set = set(radial_bin_order)
 
@@ -523,19 +529,17 @@ def load_models(models_dir):
             # Initialize flow model with matching parameters from the model
             if "model_config" in checkpoint:
                 # If we saved the configuration
-                config = checkpoint["model_config"] 
+                config = checkpoint["model_config"]
                 flow = Flow5D(
                     n_transforms=config.get("n_transforms", 12),
                     hidden_dims=config.get("hidden_dims", [128, 128]),
-                    num_bins=config.get("num_bins", 24)
+                    num_bins=config.get("num_bins", 24),
                 ).to(device)
             else:
                 # Use default configuration matching what we used in training
-                flow = Flow5D(
-                    n_transforms=12,
-                    hidden_dims=[128, 128],
-                    num_bins=24
-                ).to(device)
+                flow = Flow5D(n_transforms=12, hidden_dims=[128, 128], num_bins=24).to(
+                    device
+                )
 
             try:
                 # Check which format the model was saved in
@@ -546,15 +550,17 @@ def load_models(models_dir):
                 else:
                     print(f"Warning: Unknown model format in {model_path}")
                     continue
-                
+
                 flow.eval()
                 flows_dict[bin_name] = flow
                 scalers_dict[bin_name] = checkpoint["scaler"]
                 print(f"Successfully loaded model for {bin_name}")
-                
+
             except RuntimeError as e:
                 print(f"Error loading model for {bin_name}: {e}")
-                print("The model architecture in the file may not match the current Flow5D implementation.")
+                print(
+                    "The model architecture in the file may not match the current Flow5D implementation."
+                )
                 print("Skipping this model.")
                 continue
 
@@ -569,46 +575,27 @@ if __name__ == "__main__":
         description="Generate age-metallicity visualizations from trained models"
     )
     parser.add_argument(
-        "--models_dir", 
-        type=str, 
-        default="outputs/models", 
-        help="Directory containing model files"
+        "--models_dir",
+        type=str,
+        default="outputs/models",
+        help="Directory containing model files",
     )
     parser.add_argument(
-        "--output_dir", 
-        type=str, 
-        default="outputs/visualizations", 
-        help="Output directory for visualizations"
+        "--output_dir",
+        type=str,
+        default="outputs/visualizations",
+        help="Output directory for visualizations",
     )
     parser.add_argument(
-        "--samples", 
-        type=int, 
-        default=10000, 
-        help="Number of samples per model"
+        "--samples", type=int, default=10000, help="Number of samples per model"
+    )
+    parser.add_argument("--min_age", type=float, default=0, help="Minimum age to plot")
+    parser.add_argument("--max_age", type=float, default=20, help="Maximum age to plot")
+    parser.add_argument(
+        "--min_feh", type=float, default=-1.0, help="Minimum [Fe/H] to plot"
     )
     parser.add_argument(
-        "--min_age", 
-        type=float, 
-        default=0, 
-        help="Minimum age to plot"
-    )
-    parser.add_argument(
-        "--max_age", 
-        type=float, 
-        default=20, 
-        help="Maximum age to plot"
-    )
-    parser.add_argument(
-        "--min_feh", 
-        type=float, 
-        default=-1.5, 
-        help="Minimum [Fe/H] to plot"
-    )
-    parser.add_argument(
-        "--max_feh", 
-        type=float, 
-        default=0.5, 
-        help="Maximum [Fe/H] to plot"
+        "--max_feh", type=float, default=0.5, help="Maximum [Fe/H] to plot"
     )
 
     args = parser.parse_args()
@@ -616,7 +603,9 @@ if __name__ == "__main__":
     # Ensure models directory exists
     if not os.path.exists(args.models_dir):
         print(f"Error: Models directory '{args.models_dir}' does not exist.")
-        print("Please specify the correct directory with --models_dir or run training first.")
+        print(
+            "Please specify the correct directory with --models_dir or run training first."
+        )
         exit(1)
 
     # Create output directory if it doesn't exist
@@ -624,11 +613,11 @@ if __name__ == "__main__":
 
     # Load models
     flows_dict, scalers_dict = load_models(args.models_dir)
-    
+
     if not flows_dict:
         print("No valid models found. Please check the models directory.")
         exit(1)
-        
+
     print(f"Successfully loaded {len(flows_dict)} models: {list(flows_dict.keys())}")
 
     # Generate visualizations
