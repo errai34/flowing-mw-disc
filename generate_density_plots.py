@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from scipy.stats import gaussian_kde
+
 from flow_model import Flow5D
 
 
@@ -178,7 +179,7 @@ def plot_multiple_bin_kde(
 
     # Define bin order to ensure correct ordering from inner to outer
     radial_bin_order = ["R0-6", "R6-8", "R8-10", "R10-15"]
-    
+
     # Plot each bin in the correct order
     for i, bin_name in enumerate(radial_bin_order):
         if bin_name in flows_dict:
@@ -420,7 +421,7 @@ def generate_visualizations(
 
     # Define bin order to ensure correct ordering from inner to outer
     radial_bin_order = ["R0-6", "R6-8", "R8-10", "R10-15"]
-    
+
     # Generate individual visualizations in the correct order
     for bin_name in radial_bin_order:
         if bin_name in flows_dict:
@@ -467,20 +468,9 @@ def generate_visualizations(
     print(f"Visualizations saved to {viz_dir}")
 
 
-# Use this function in your main script
 def load_models(models_dir):
     """
     Load trained flow models from a directory.
-
-    Parameters:
-    -----------
-    models_dir : str
-        Directory containing model files
-
-    Returns:
-    --------
-    tuple
-        (flows_dict, scalers_dict)
     """
     # Get device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -488,7 +478,7 @@ def load_models(models_dir):
 
     flows_dict = {}
     scalers_dict = {}
-    
+
     # Define the order of radial bins
     # This will ensure bins are processed in the correct order from inner to outer
     radial_bin_order = ["R0-6", "R6-8", "R8-10", "R10-15"]
@@ -500,7 +490,7 @@ def load_models(models_dir):
             bin_name = filename.split("_model.pt")[0]
             model_path = os.path.join(models_dir, filename)
             model_files[bin_name] = model_path
-    
+
     # Load models in the specified order
     for bin_name in radial_bin_order:
         if bin_name in model_files:
@@ -510,7 +500,16 @@ def load_models(models_dir):
 
             # Initialize flow model
             flow = Flow5D().to(device)
-            flow.load_state_dict(checkpoint["model_state"])
+
+            # Check which format the model was saved in
+            if "flow_state" in checkpoint:
+                flow.load_state_dict(checkpoint["flow_state"])
+            elif "model_state" in checkpoint:
+                flow.load_state_dict(checkpoint["model_state"])
+            else:
+                print(f"Warning: Unknown model format in {model_path}")
+                continue
+
             flow.eval()
 
             flows_dict[bin_name] = flow

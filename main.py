@@ -2,68 +2,45 @@
 # -*- coding: utf-8 -*-
 """
 Main script for training and analyzing normalizing flow models of Galactic evolution.
-Implements the analysis pipeline described in the paper.
+Implements the analysis pipeline with improved density deconvolution based on the paper.
 """
 
-import argparse
 import os
 import time
 import warnings
+from collections import defaultdict
 
 import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.optim as optim
+from sklearn.preprocessing import StandardScaler
+from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 # Suppress all warnings
 warnings.filterwarnings("ignore")
 
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-import torch.optim as optim  # noqa: E402
-import yaml  # noqa: E402
-from sklearn.preprocessing import StandardScaler  # noqa: E402
-from torch.utils.data import DataLoader, TensorDataset  # noqa: E402
-
-from data_handler import StellarDataHandler, prepare_data_for_radial_bins  # noqa: E402
-
-# Import the new flow model implementation instead of the old one
-from flow_model import Flow5D  # noqa: E402
-from gradient_analysis import analyze_metallicity_gradients  # noqa: E402
-from uncertainty import uncertainty_aware_elbo  # noqa: E402
-from visualization import (  # noqa: E402
-    create_master_gradient_plot,
-    plot_bin_chemical_distribution,
-    plot_gradient_analysis,
-    plot_radial_bin_comparison,
+from flow_model import Flow5D
+from uncertainty import (
+    RecognitionNetwork,
+    compute_diagnostics,
+    importance_weighted_elbo,
+    uncertainty_aware_elbo,
 )
 
 # Set device (GPU if available)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def train_flow_model(
-    data,
-    errors,
-    n_transforms=16,
-    hidden_dims=None,
-    n_epochs=100,
-    batch_size=256,
-    lr=1e-3,
-    weight_decay=1e-5,
-    output_dir=None,
-):
+def pretrain_flow(data, n_epochs=20, batch_size=256, lr=1e-3, weight_decay=1e-5):
     """
-    Train a normalizing flow model on data with uncertainty-aware training.
+    Pretrain flow model using maximum likelihood on data.
 
     Parameters:
     -----------
     data : np.ndarray
-        Data array of shape (N, 5)
-    errors : np.ndarray
-        Error array of shape (N, 5)
-    n_transforms : int
-        Number of transforms in the flow
-    hidden_dims : list
-        Dimensions of hidden layers
+        Data array of shape (N, D)
     n_epochs : int
         Number of training epochs
     batch_size : int
@@ -78,9 +55,149 @@ def train_flow_model(
     tuple
         (trained flow model, scaler, training stats)
     """
+    # Ensure n_epochs is an integer
+    n_epochs = int(n_epochs)
+
+    # Scale data
+    scaler = StandardScaler()
+    data_scaled = scaler.fit_transform(data)
+
+    # Convert to tensors
+    data_tensor = torch.tensor(data_scaled, dtype=torch.float32).to(device)
+
+    # Create dataset and loader
+    dataset = TensorDataset(data_tensor)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    # Initialize flow model with enhanced configuration
+    flow = Flow5D(
+        n_transforms=12,  # Reduced from 16
+        hidden_dims=[128, 128],  # Reduced from [256, 256]
+        num_bins=24,  # Reduced from 32
+        use_residual_blocks=True,
+        dropout_probability=0.0,  # No dropout during pretraining
+    ).to(device)
+
+    # Optimizer
+    optimizer = optim.AdamW(flow.parameters(), lr=lr, weight_decay=weight_decay)
+
+    # Training loop
+    train_stats = {"log_likelihood": [], "time": []}
+    start_time = time.time()
+
+    print(f"Pretraining flow on {len(data)} data points for {n_epochs} epochs")
+    for epoch in range(n_epochs):
+        epoch_start = time.time()
+        flow.train()
+        epoch_lls = []
+
+        # Progress bar
+        batch_progress = tqdm(
+            loader,
+            desc=f"Pretraining Epoch {epoch+1}/{n_epochs}",
+            leave=False,
+            ncols=100,
+        )
+
+        for (batch_data,) in batch_progress:
+            optimizer.zero_grad()
+
+            # Compute log likelihood
+            log_likelihood = flow.log_prob(batch_data)
+            loss = -torch.mean(log_likelihood)
+
+            # Backward and optimize
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(flow.parameters(), 10.0)
+            optimizer.step()
+
+            epoch_lls.append(-loss.item())
+            batch_progress.set_postfix({"LL": f"{-loss.item():.4f}"})
+
+        # Track stats
+        avg_ll = np.mean(epoch_lls)
+        epoch_time = time.time() - epoch_start
+        total_time = time.time() - start_time
+
+        train_stats["log_likelihood"].append(avg_ll)
+        train_stats["time"].append(total_time)
+
+        print(
+            f"Pretraining Epoch {epoch+1}/{n_epochs}, Log-Likelihood: {avg_ll:.4f}, "
+            f"Time: {epoch_time:.2f}s"
+        )
+
+    print(
+        f"Pretraining complete. Final Log-Likelihood: {train_stats['log_likelihood'][-1]:.4f}"
+    )
+    return flow, scaler, train_stats
+
+
+def train_flow_model(
+    data,
+    errors,
+    n_transforms=12,
+    hidden_dims=None,
+    n_epochs=50,
+    batch_size=256,
+    lr=1e-3,
+    weight_decay=1e-5,
+    mc_samples=20,
+    use_importance_weighted=False,
+    output_dir=None,
+    pretrain_epochs=10,  # Added parameter
+):
+    """
+    Train a normalizing flow model on data with uncertainty-aware training.
+    Uses the improved implementation with a dedicated recognition network.
+
+    Parameters:
+    -----------
+    data : np.ndarray
+        Data array of shape (N, D)
+    errors : np.ndarray
+        Error array of shape (N, D)
+    n_transforms : int
+        Number of transforms in the flow
+    hidden_dims : list
+        Dimensions of hidden layers
+    n_epochs : int
+        Number of training epochs
+    batch_size : int
+        Batch size for training
+    lr : float
+        Learning rate
+    weight_decay : float
+        Weight decay for optimizer
+    mc_samples : int
+        Number of Monte Carlo samples for ELBO estimation
+    use_importance_weighted : bool
+        Whether to use importance weighted ELBO
+    output_dir : str
+        Directory to save progress plots
+    pretrain_epochs : int
+        Number of epochs for pretraining
+
+    Returns:
+    --------
+    tuple
+        (trained flow model, recognition network, scaler, training stats)
+    """
+    print(
+        "Starting density deconvolution training with dedicated recognition network..."
+    )
+
+    # Ensure these are integers
+    n_epochs = int(n_epochs)
+    mc_samples = int(mc_samples)
+    pretrain_epochs = int(pretrain_epochs)
+
     # Use default hidden dimensions if not provided
     if hidden_dims is None:
-        hidden_dims = [128, 128]
+        hidden_dims = [128, 128]  # Reduced from [256, 256]
+
+    # Get data dimensions
+    input_dim = data.shape[1]
 
     # Scale data
     scaler = StandardScaler()
@@ -95,32 +212,68 @@ def train_flow_model(
     dataset = TensorDataset(data_tensor, errors_tensor)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    # Initialize flow model
-    # Use the new nflows-based implementation
-    flow = Flow5D(n_transforms=n_transforms, hidden_dims=hidden_dims).to(device)
-
-    # Optimizer
-    optimizer = optim.AdamW(flow.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=5
+    # Stage 1: Pretrain the flow model
+    print(f"\n=== Stage 1: Pretraining flow model for {pretrain_epochs} epochs ===")
+    flow, _, _ = pretrain_flow(
+        data=data,
+        n_epochs=pretrain_epochs,  # Use parameter here
+        batch_size=batch_size,
+        lr=lr,
+        weight_decay=weight_decay,
     )
-    # We'll manually print learning rate changes instead of using verbose=True
+
+    # Initialize recognition network
+    recognition_net = RecognitionNetwork(
+        input_dim=input_dim, n_transforms=8, hidden_dims=hidden_dims
+    ).to(device)
+
+    # Stage 2: Train with uncertainty-aware ELBO
+    print(
+        f"\n=== Stage 2: Training with uncertainty-aware ELBO for {n_epochs} epochs ==="
+    )
+
+    # Optimizer for both models
+    optimizer = optim.AdamW(
+        list(flow.parameters()) + list(recognition_net.parameters()),
+        lr=lr,
+        weight_decay=weight_decay,
+    )
+
+    # Learning rate scheduler with warmup
+    def lr_lambda(epoch):
+        warmup_epochs = 5  # Reduced from 10
+        if epoch < warmup_epochs:
+            return epoch / warmup_epochs
+        return 0.5 ** (epoch / 20)  # Halve the learning rate every 20 epochs
+
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # Create plots directory
     plots_dir = os.path.join(os.path.dirname(output_dir), "plots")
     os.makedirs(plots_dir, exist_ok=True)
 
     # Training loop
-    train_stats = {"elbo": [], "lr": [], "time": []}
+    train_stats = {
+        "elbo": [],
+        "iwae": [],
+        "reconstruction": [],
+        "kl": [],
+        "ess": [],
+        "lr": [],
+        "time": [],
+    }
+
     best_elbo = -float("inf")
-    best_state = None
+    best_state = {"flow": None, "recognition": None}
     start_time = time.time()
 
     print(f"Training on {len(data)} data points for {n_epochs} epochs")
     for epoch in range(n_epochs):
         epoch_start = time.time()
         flow.train()
-        epoch_elbos = []
+        recognition_net.train()
+
+        epoch_metrics = defaultdict(list)
 
         # Create progress bar for batches
         batch_progress = tqdm(
@@ -130,366 +283,189 @@ def train_flow_model(
         for batch_data, batch_errors in batch_progress:
             optimizer.zero_grad()
 
-            # Compute ELBO with uncertainty
-            elbo = uncertainty_aware_elbo(flow, batch_data, batch_errors, K=10)
+            # Compute ELBO or IWAE
+            if use_importance_weighted and epoch >= 10:  # Start with regular ELBO
+                elbo = importance_weighted_elbo(
+                    flow, recognition_net, batch_data, batch_errors, K=mc_samples
+                )
+                epoch_metrics["iwae"].append(elbo.item())
+            else:
+                elbo = uncertainty_aware_elbo(
+                    flow, recognition_net, batch_data, batch_errors, K=mc_samples
+                )
+                epoch_metrics["elbo"].append(elbo.item())
+
             loss = -elbo
+
+            # Compute diagnostics occasionally
+            if np.random.rand() < 0.1:  # 10% of batches
+                diagnostics = compute_diagnostics(
+                    flow,
+                    recognition_net,
+                    batch_data,
+                    batch_errors,
+                    n_samples=mc_samples,
+                )
+                for k, v in diagnostics.items():
+                    epoch_metrics[k].append(v)
 
             # Backward and optimize
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(flow.parameters(), 10.0)
+            torch.nn.utils.clip_grad_norm_(
+                list(flow.parameters()) + list(recognition_net.parameters()), 10.0
+            )
             optimizer.step()
 
-            epoch_elbos.append(elbo.item())
             # Update progress bar
-            batch_progress.set_postfix({"ELBO": f"{elbo.item():.4f}"})
+            objective_val = elbo.item()
+            batch_progress.set_postfix({"ELBO": f"{objective_val:.4f}"})
+
+        # Update learning rate
+        scheduler.step()
+
+        # Compute average metrics
+        train_metrics = {}
+        for k, v in epoch_metrics.items():
+            if v:  # Only include metrics that have values
+                train_metrics[k] = np.mean(v)
 
         # Track stats
-        avg_elbo = np.mean(epoch_elbos)
+        for k, v in train_metrics.items():
+            if k in train_stats:
+                train_stats[k].append(v)
+
+        # Fill in missing metrics to maintain consistent history
+        for k in train_stats.keys():
+            if k not in train_metrics and k != "time" and k != "lr":
+                train_stats[k].append(None)
+
+        # Always record time and learning rate
         epoch_time = time.time() - epoch_start
         total_time = time.time() - start_time
-
-        train_stats["elbo"].append(avg_elbo)
-        train_stats["lr"].append(optimizer.param_groups[0]["lr"])
         train_stats["time"].append(total_time)
+        train_stats["lr"].append(optimizer.param_groups[0]["lr"])
 
-        # Update scheduler
-        scheduler.step(avg_elbo)
+        # Determine current objective value (IWAE if available, else ELBO)
+        current_objective = train_metrics.get(
+            "iwae", train_metrics.get("elbo", -float("inf"))
+        )
 
         # Save best model
-        if avg_elbo > best_elbo:
-            best_elbo = avg_elbo
-            best_state = {k: v.cpu().clone() for k, v in flow.state_dict().items()}
-            print(f"New best ELBO: {best_elbo:.4f}")
+        if current_objective > best_elbo:
+            best_elbo = current_objective
+            best_state = {
+                "flow": {k: v.cpu().clone() for k, v in flow.state_dict().items()},
+                "recognition": {
+                    k: v.cpu().clone() for k, v in recognition_net.state_dict().items()
+                },
+            }
+            print(f"New best objective: {best_elbo:.4f}")
 
-        # Print status more frequently for enhanced progress display
+        # Print status
+        metric_str = ", ".join([f"{k}: {v:.4f}" for k, v in train_metrics.items()])
         print(
-            f"Epoch {epoch+1}/{n_epochs}, ELBO: {avg_elbo:.4f}, "
+            f"Epoch {epoch+1}/{n_epochs}, {metric_str}, "
             f"LR: {optimizer.param_groups[0]['lr']:.6f}, "
             f"Time: {epoch_time:.2f}s"
         )
 
-    # Plot training progress
-    plt.figure(figsize=(15, 5))
-
-    # Plot ELBO
-    plt.subplot(1, 3, 1)
-    plt.plot(train_stats["elbo"], "b-", marker="o")
-    plt.xlabel("Epoch")
-    plt.ylabel("ELBO")
-    plt.title("Training Progress: ELBO")
-    plt.grid(True)
-
-    # Plot Learning Rate
-    plt.subplot(1, 3, 2)
-    plt.plot(train_stats["lr"], "r-", marker="o")
-    plt.xlabel("Epoch")
-    plt.ylabel("Learning Rate")
-    plt.title("Learning Rate Schedule")
-    plt.grid(True)
-
-    # Plot Training Time
-    plt.subplot(1, 3, 3)
-    plt.plot(range(len(train_stats["time"])), train_stats["time"], "g-", marker="o")
-    plt.xlabel("Epoch")
-    plt.ylabel("Cumulative Time (s)")
-    plt.title("Training Time")
-    plt.grid(True)
-
-    # Save the plot
-    bin_name = os.path.basename(output_dir).split("_")[0] if output_dir else "unknown"
-    training_plot_path = os.path.join(plots_dir, f"training_progress_{bin_name}.png")
-    plt.tight_layout()
-    plt.savefig(training_plot_path)
-    plt.close()
-
-    print(f"Training plot saved to {training_plot_path}")
-
-    # Load best model
-    flow.load_state_dict(best_state)
-    flow.to(device)
-
-    print(f"Training complete. Best ELBO: {best_elbo:.4f}")
-    return flow, scaler, train_stats
-
-
-def train_models_for_all_bins(
-    bin_data, output_dir, config=None, n_epochs=100, lr=1e-3, force_retrain=False
-):
-    """
-    Train models for all radial bins and save results.
-
-    Parameters:
-    -----------
-    bin_data : dict
-        Dictionary with bin data from prepare_data_for_radial_bins
-    output_dir : str
-        Directory to save models and results
-    config : dict
-        Configuration dictionary
-    n_epochs : int
-        Number of training epochs
-    lr : float
-        Learning rate
-    force_retrain : bool
-        Whether to force retraining of models
-
-    Returns:
-    --------
-    tuple
-        (flows_dict, scalers_dict, stats_dict)
-    """
-    # Create output directories
-    os.makedirs(output_dir, exist_ok=True)
-    plots_dir = os.path.join(os.path.dirname(output_dir), "plots")
-    os.makedirs(plots_dir, exist_ok=True)
-
-    flows_dict = {}
-    scalers_dict = {}
-    stats_dict = {}
-
-    # Extract training parameters from config if available
-    if config is not None:
-        flow_config = config.get("flow", {})
-        training_config = config.get("training", {})
-
-        n_transforms = flow_config.get("n_transforms", 16)
-        hidden_dims = flow_config.get("hidden_dims", [128, 128])
-        batch_size = training_config.get("batch_size", 256)
-        weight_decay = float(training_config.get("weight_decay", 1e-5))
-    else:
-        n_transforms = 16
-        hidden_dims = [128, 128]
-        batch_size = 256
-        weight_decay = 1e-5
-
-    # Extract visualization parameters
-    if config is not None:
-        analysis_config = config.get("analysis", {})
-        grid_resolution = analysis_config.get("grid_resolution", 50)
-    else:
-        grid_resolution = 50
-
-    for bin_name, bin_info in bin_data.items():
-        print(f"\nTraining model for bin {bin_name}...")
-        model_path = os.path.join(output_dir, f"{bin_name}_model.pt")
-
-        # Skip if model already exists and not force_retrain
-        if os.path.exists(model_path) and not force_retrain:
-            print(f"Loading existing model for {bin_name} from {model_path}")
-            checkpoint = torch.load(model_path, map_location=device)
-
-            # Use the new nflows-based implementation
-            flow = Flow5D().to(device)
-            flow.load_state_dict(checkpoint["model_state"])
-
-            flows_dict[bin_name] = flow
-            scalers_dict[bin_name] = checkpoint["scaler"]
-            stats_dict[bin_name] = checkpoint["stats"]
-            continue
-
-        # Train new model
-        flow, scaler, stats = train_flow_model(
-            bin_info["data"],
-            bin_info["err"],
-            n_transforms=n_transforms,
-            hidden_dims=hidden_dims,
-            n_epochs=n_epochs,
-            batch_size=batch_size,
-            lr=lr,
-            weight_decay=weight_decay,
-            output_dir=os.path.join(output_dir, bin_name),
-        )
-
-        # Save model
-        torch.save(
-            {"model_state": flow.state_dict(), "scaler": scaler, "stats": stats},
-            model_path,
-        )
-
-        flows_dict[bin_name] = flow
-        scalers_dict[bin_name] = scaler
-        stats_dict[bin_name] = stats
-
-        print(f"Model for {bin_name} saved to {model_path}")
-
-    # Visual distributions are created in the analyze_all_bins function instead
-    return flows_dict, scalers_dict, stats_dict
-
-
-def analyze_all_bins(flows_dict, scalers_dict, output_dir, config=None):
-    """
-    Run analysis for all bins and create visualizations.
-
-    Parameters:
-    -----------
-    flows_dict : dict
-        Dictionary mapping bin names to flow models
-    scalers_dict : dict
-        Dictionary mapping bin names to scalers
-    output_dir : str
-        Directory to save results
-    config : dict
-        Configuration dictionary
-    """
-    # Create output directories
-    plots_dir = os.path.join(output_dir, "plots")
-    gradient_dir = os.path.join(output_dir, "gradients")
-    os.makedirs(plots_dir, exist_ok=True)
-    os.makedirs(gradient_dir, exist_ok=True)
-
-    # Extract analysis parameters from config if available
-    if config is not None:
-        analysis_config = config.get("analysis", {})
-        age_values = analysis_config.get("age_values", [4, 6, 8, 10, 12])
-        feh_min, feh_max, feh_steps = analysis_config.get("feh_range", [-1.0, 0.5, 100])
-        age_range = (0, 14)
-        feh_range = (-1.0, 0.5)
-        mgfe_range = (0.0, 0.4)
-        grid_resolution = analysis_config.get("grid_resolution", 50)
-    else:
-        age_values = [4, 6, 8, 10, 12]
-        feh_min, feh_max, feh_steps = -1.0, 0.5, 100
-        age_range = (0, 14)
-        feh_range = (-1.0, 0.5)
-        mgfe_range = (0.0, 0.4)
-        grid_resolution = 50
-
-    # Create individual bin plots
-    for bin_name, flow in flows_dict.items():
-        scaler = scalers_dict[bin_name]
-
-        # Chemical distribution plots
-        print(f"Generating chemical distribution plots for {bin_name}...")
-        plot_bin_chemical_distribution(
-            flow,
-            scaler,
-            bin_name,
-            save_dir=plots_dir,
-            age_range=age_range,
-            feh_range=feh_range,
-            mgfe_range=mgfe_range,
-            grid_resolution=grid_resolution,
-        )
-
-        # Gradient analysis
-        gradient_results = analyze_metallicity_gradients(
-            flow, scaler, age_values=age_values, feh_range=(feh_min, feh_max, feh_steps)
-        )
-
-        # Plot gradient analysis
-        plot_gradient_analysis(
-            gradient_results,
-            bin_name,
-            save_path=os.path.join(gradient_dir, f"{bin_name}_gradients.png"),
-        )
-
-    # Create comparison plots across bins
-    print("Generating radial bin comparison plot...")
-    plot_radial_bin_comparison(
-        flows_dict,
-        scalers_dict,
-        save_path=os.path.join(plots_dir, "radial_bin_comparison.png"),
-    )
-
-    # Create master gradient plot
-    print("Generating master gradient plot...")
-    gradient_results_dict = {}
-
-    for bin_name, flow in flows_dict.items():
-        scaler = scalers_dict[bin_name]
-        gradient_results_dict[bin_name] = analyze_metallicity_gradients(
-            flow, scaler, age_values=age_values, feh_range=(feh_min, feh_max, feh_steps)
-        )
-
-    create_master_gradient_plot(
-        gradient_results_dict,
-        save_path=os.path.join(gradient_dir, "master_gradient_plot.png"),
-    )
-
-
-def main(args):
-    """Main function to run the full analysis pipeline"""
-    print(f"Using device: {device}")
-
-    # Load configuration
-    with open(args.config, "r") as f:
-        config = yaml.safe_load(f)
-
-    # Load data
-    data_handler = StellarDataHandler.from_config(args.config)
-
-    try:
-        # Try loading from CSV first
-        print("Attempting to load APOGEE data from CSV...")
-        mw_data = data_handler.load_apogee_csv()
-    except FileNotFoundError:
-        # If CSV fails, try FITS
-        print("CSV not found, attempting to load from FITS...")
-        try:
-            mw_data = data_handler.load_apogee_fits()
-        except FileNotFoundError:
-            raise FileNotFoundError(
-                "Could not find APOGEE data files. Please check your paths in config.yaml."
+        # Visualize progress every 10 epochs
+        if epoch % 10 == 0 and output_dir:
+            # Generate and save a diagnostic plot
+            bin_name = (
+                os.path.basename(output_dir).split("_")[0] if output_dir else "unknown"
+            )
+            training_plot_path = os.path.join(
+                plots_dir, f"training_progress_{bin_name}_epoch_{epoch}.png"
             )
 
-    print(f"Successfully loaded {len(mw_data)} stars")
+            plt.figure(figsize=(15, 10))
 
-    # Apply quality filters using the data handler
-    filtered_mw = data_handler.apply_quality_filters(mw_data)
-    print(f"After filtering, we have {len(filtered_mw)} stars")
+            # Plot ELBO/IWAE
+            plt.subplot(2, 2, 1)
+            if any(v is not None for v in train_stats["elbo"]):
+                plt.plot(
+                    [i for i, v in enumerate(train_stats["elbo"]) if v is not None],
+                    [v for v in train_stats["elbo"] if v is not None],
+                    "b-",
+                    marker="o",
+                    label="ELBO",
+                )
+            if any(v is not None for v in train_stats["iwae"]):
+                plt.plot(
+                    [i for i, v in enumerate(train_stats["iwae"]) if v is not None],
+                    [v for v in train_stats["iwae"] if v is not None],
+                    "g-",
+                    marker="o",
+                    label="IWAE",
+                )
+            plt.xlabel("Epoch")
+            plt.ylabel("Objective")
+            plt.title("Training Progress: Objective")
+            plt.legend()
+            plt.grid(True)
 
-    # Prepare data for radial bins - use bins directly from config
-    bin_data = prepare_data_for_radial_bins(filtered_mw, config.get("radial_bins"))
+            # Plot Reconstruction vs KL terms
+            plt.subplot(2, 2, 2)
+            if any(v is not None for v in train_stats["reconstruction"]):
+                plt.plot(
+                    [
+                        i
+                        for i, v in enumerate(train_stats["reconstruction"])
+                        if v is not None
+                    ],
+                    [v for v in train_stats["reconstruction"] if v is not None],
+                    "r-",
+                    marker="o",
+                    label="Reconstruction",
+                )
+            if any(v is not None for v in train_stats["kl"]):
+                plt.plot(
+                    [i for i, v in enumerate(train_stats["kl"]) if v is not None],
+                    [v for v in train_stats["kl"] if v is not None],
+                    "m-",
+                    marker="o",
+                    label="KL",
+                )
+            plt.xlabel("Epoch")
+            plt.ylabel("Value")
+            plt.title("ELBO Components")
+            plt.legend()
+            plt.grid(True)
 
-    # Create output directory
-    output_dir = os.path.join(args.output_dir, "models")
-    os.makedirs(
-        args.output_dir, exist_ok=True
-    )  # Create main output dir if it doesn't exist
+            # Plot Effective Sample Size
+            plt.subplot(2, 2, 3)
+            if any(v is not None for v in train_stats["ess"]):
+                plt.plot(
+                    [i for i, v in enumerate(train_stats["ess"]) if v is not None],
+                    [v for v in train_stats["ess"] if v is not None],
+                    "c-",
+                    marker="o",
+                )
+                plt.xlabel("Epoch")
+                plt.ylabel("ESS / K")
+                plt.title("Effective Sample Size Ratio")
+                plt.grid(True)
 
-    # Get training parameters, with command line arguments taking precedence
-    training_config = config.get("training", {})
-    n_epochs = args.epochs or training_config.get("n_epochs", 100)
-    lr = args.lr or float(training_config.get("lr", 1e-3))
+            # Plot Learning Rate
+            plt.subplot(2, 2, 4)
+            plt.plot(train_stats["lr"], "k-", marker="o")
+            plt.xlabel("Epoch")
+            plt.ylabel("Learning Rate")
+            plt.title("Learning Rate Schedule")
+            plt.grid(True)
 
-    # Train models for all bins
-    flows_dict, scalers_dict, stats_dict = train_models_for_all_bins(
-        bin_data,
-        output_dir,
-        config=config,
-        n_epochs=n_epochs,
-        lr=lr,
-        force_retrain=args.force_retrain,
-    )
+            plt.tight_layout()
+            plt.savefig(training_plot_path)
+            plt.close()
 
-    # Run analysis
-    analyze_all_bins(flows_dict, scalers_dict, args.output_dir, config=config)
+            print(f"Training progress plot saved to {training_plot_path}")
 
-    print(f"Analysis complete. Results saved to {args.output_dir}")
+    # Load best model
+    flow.load_state_dict(best_state["flow"])
+    recognition_net.load_state_dict(best_state["recognition"])
+    flow.to(device)
+    recognition_net.to(device)
 
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Train and analyze normalizing flow models for Galactic evolution"
-    )
-    parser.add_argument(
-        "--config", type=str, default="config.yaml", help="Path to config file"
-    )
-    parser.add_argument(
-        "--output_dir", type=str, default="outputs", help="Output directory"
-    )
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=None,
-        help="Number of training epochs (overrides config)",
-    )
-    parser.add_argument(
-        "--lr", type=float, default=None, help="Learning rate (overrides config)"
-    )
-    parser.add_argument(
-        "--force_retrain", action="store_true", help="Force retraining of models"
-    )
-
-    args = parser.parse_args()
-    main(args)
+    print(f"Training complete. Best objective: {best_elbo:.4f}")
+    return flow, recognition_net, scaler, train_stats
