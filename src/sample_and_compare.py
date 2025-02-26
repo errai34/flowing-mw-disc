@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from scipy.stats import gaussian_kde
 
-from simplified_train_flow_model import Flow3D
+from src.simplified_train_flow_model import Flow3D
 
 # Load the trained model
 model_path = "results/3d_uncertainty_model.pt"

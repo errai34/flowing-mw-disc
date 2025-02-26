@@ -20,8 +20,8 @@ from tqdm import tqdm
 # Suppress all warnings
 warnings.filterwarnings("ignore")
 
-from flow_model import Flow5D  # noqa: E402
-from uncertainty import (  # noqa: E402
+from src.flow_model import Flow5D  # noqa: E402
+from src.uncertainty import (  # noqa: E402
     RecognitionNetwork,
     uncertainty_aware_elbo,
 )

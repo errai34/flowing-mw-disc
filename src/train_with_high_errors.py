@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from scipy.stats import gaussian_kde
 
-from simplified_train_flow_model import train_flow_with_uncertainty
+from src.simplified_train_flow_model import train_flow_with_uncertainty
 
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -21,7 +21,7 @@ def train_and_evaluate():
     data_dir = "high_error_data"
     if not os.path.exists(os.path.join(data_dir, "noisy_data.npy")):
         print("High-error data not found. Generating it first...")
-        from generate_high_error_data import (
+        from src.generate_high_error_data import (
             generate_mock_data_high_errors,
             save_high_error_data,
             visualize_mock_data_with_errors,

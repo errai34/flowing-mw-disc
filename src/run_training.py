@@ -14,10 +14,10 @@ import yaml
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
-from data_handler import StellarDataHandler, prepare_data_for_radial_bins
-from flow_model import Flow5D
-from uncertainty import RecognitionNetwork
-from visualization import plot_bin_chemical_distribution
+from src.data_handler import StellarDataHandler, prepare_data_for_radial_bins
+from src.flow_model import Flow5D
+from src.uncertainty import RecognitionNetwork
+from src.visualization import plot_bin_chemical_distribution
 
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -40,11 +40,11 @@ def main(args):
     # Create models directory if it doesn't exist
     models_dir = os.path.join(args.output_dir, "models")
     os.makedirs(models_dir, exist_ok=True)
-    
+
     # Create plots directory
     plots_dir = os.path.join(args.output_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
-    
+
     # Create run directory for logs
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = os.path.join(args.output_dir, f"run_{timestamp}")
@@ -76,7 +76,7 @@ def main(args):
             "mc_samples": args.mc_samples,
             "use_importance_weighted": args.use_iwae,
         },
-        "bin_name": formatted_bin_name
+        "bin_name": formatted_bin_name,
     }
 
     with open(os.path.join(run_dir, "config.yaml"), "w") as f:
@@ -106,12 +106,12 @@ def main(args):
         # Prepare data for radial bins
         formatted_bin_ranges = []
         original_to_formatted = {}
-        
+
         for bin_range in args.bin_ranges:
             formatted = format_bin_name(bin_range)
             formatted_bin_ranges.append(formatted)
             original_to_formatted[bin_range] = formatted
-            
+
             # Also map Rbin-range format to formatted
             if "-" in bin_range:
                 r_bin = f"R{bin_range}"
@@ -120,7 +120,7 @@ def main(args):
         # Find the formatted bin name from the original args.bin_name
         if args.bin_name in original_to_formatted:
             formatted_bin_name = original_to_formatted[args.bin_name]
-        
+
         # Convert ranges to actual numeric values
         bin_ranges = []
         for bin_name in formatted_bin_ranges:
@@ -129,7 +129,7 @@ def main(args):
             bin_ranges.append((r_min, r_max))
 
         bin_data = prepare_data_for_radial_bins(filtered_mw, bin_ranges)
-        
+
         # Map bin data keys to formatted names
         formatted_bin_data = {}
         for i, (old_key, value) in enumerate(bin_data.items()):
@@ -143,7 +143,9 @@ def main(args):
             return
 
         bin_info = formatted_bin_data[formatted_bin_name]
-        print(f"Training model for bin {formatted_bin_name} with {bin_info['count']} stars")
+        print(
+            f"Training model for bin {formatted_bin_name} with {bin_info['count']} stars"
+        )
 
         # Get data and errors
         data = bin_info["data"]
@@ -186,7 +188,7 @@ def main(args):
         )
 
         # Import the custom training function with modifications
-        from main import train_flow_model
+        from src.main import train_flow_model
 
         flow, recognition_net, scaler, stats = train_flow_model(
             data=data,
@@ -215,7 +217,7 @@ def main(args):
                     "n_transforms": args.n_transforms,
                     "hidden_dims": [args.hidden_dim, args.hidden_dim],
                     "num_bins": args.num_bins,
-                }
+                },
             },
             model_path,
         )

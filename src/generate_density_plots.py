@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from scipy.stats import gaussian_kde
 
-from flow_model import Flow5D
+from src.flow_model import Flow5D
 
 
 def plot_age_metallicity_kde(
@@ -436,9 +436,11 @@ def generate_visualizations(
     os.makedirs(viz_dir, exist_ok=True)
     os.makedirs(kde_dir, exist_ok=True)
     os.makedirs(heatmap_dir, exist_ok=True)
-    
+
     print(f"Generating visualizations with age range: {age_range} Gyr")
-    print(f"Note: With flip_age_axis=True, older ages will appear on the LEFT side of plots")
+    print(
+        "Note: With flip_age_axis=True, older ages will appear on the LEFT side of plots"
+    )
 
     # Define bin order to ensure correct ordering from inner to outer
     radial_bin_order = ["R0.0-6.0", "R6.0-8.0", "R8.0-10.0", "R10.0-15.0"]

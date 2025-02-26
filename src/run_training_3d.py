@@ -17,8 +17,8 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
-from data_handler import StellarDataHandler
-from flow_model import Flow3D
+from src.data_handler import StellarDataHandler
+from src.flow_model import Flow3D
 
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

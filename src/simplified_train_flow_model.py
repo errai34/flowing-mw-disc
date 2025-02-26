@@ -497,7 +497,7 @@ def main():
         print(f"Loaded mock data: {data.shape}, errors: {errors.shape}")
     except FileNotFoundError:
         print("Mock data not found. Generating new mock data...")
-        from generate_mock_data import (
+        from generate_high_error_data import (
             generate_mock_stellar_data,
             save_mock_data,
             visualize_mock_data,
