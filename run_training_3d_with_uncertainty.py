@@ -136,21 +136,30 @@ def compute_log_noise_pdf(w, v, e):
     torch.Tensor
         Log probability of the noise model
     """
-    # Clamp the error so that the variance never vanishes
-    e_safe = e.clamp(min=1e-8)
-
-    # Compute log probability
+    # Apply minimum error floor to prevent vanishing gradients
+    # This is critical for real data where some errors might be very small
+    e_safe = torch.clamp(e, min=1e-2)  # Increased minimum value
+    
+    # Apply error scaling factor to ensure noise model gets proper weight
+    # This helps prevent the KL term from vanishing with real data
+    error_scale = 1.0  # Adjust this value if needed (0.5-2.0 range)
+    e_scaled = e_safe * error_scale
+    
+    # Compute log probability with more stable implementation
     log_prob = -0.5 * torch.sum(
-        torch.log(2 * torch.pi * e_safe.pow(2)) + ((w - v) / e_safe).pow(2), dim=-1
+        torch.log(2 * torch.pi * e_scaled.pow(2)) + ((w - v) / e_scaled).pow(2), dim=-1
     )
-
+    
     return log_prob
 
 
-def uncertainty_aware_elbo(flow, recognition_net, observed_data, uncertainties, K=10):
+def uncertainty_aware_elbo(flow, recognition_net, observed_data, uncertainties, K=10, beta=1.0):
     """
-    Compute uncertainty-aware ELBO for 3D models.
-    ELBO = E_q(v|w)[log p(w|v) + log p(v) - log q(v|w)]
+    Compute uncertainty-aware ELBO for 3D models with improved stability.
+    ELBO = E_q(v|w)[log p(w|v) + beta * (log p(v) - log q(v|w))]
+
+    Beta parameter controls the weight of the KL divergence term, 
+    which helps prevent posterior collapse.
 
     Parameters:
     -----------
@@ -164,6 +173,8 @@ def uncertainty_aware_elbo(flow, recognition_net, observed_data, uncertainties, 
         Measurement uncertainties
     K : int
         Number of Monte Carlo samples
+    beta : float
+        Weight for the KL divergence term (KL annealing parameter)
 
     Returns:
     --------
@@ -188,12 +199,29 @@ def uncertainty_aware_elbo(flow, recognition_net, observed_data, uncertainties, 
         samples, repeated_observed, repeated_uncertainties
     )  # Posterior
 
+    # Compute KL divergence term with numerical stability check
+    kl_div = log_q_v_given_w - log_p_v
+    
+    # Safeguard against extreme values
+    kl_div = torch.clamp(kl_div, max=1000.0)
+    
+    # Weight the KL term with beta (for KL annealing if needed)
+    weighted_kl = beta * kl_div
+    
     # Compute ELBO for each sample
-    elbo_components = log_p_w_given_v + log_p_v - log_q_v_given_w
+    elbo_components = log_p_w_given_v - weighted_kl
     elbo_components = elbo_components.reshape(batch_size, K)
 
     # Average over MC samples
     elbo = torch.mean(elbo_components, dim=1)
+    
+    # Add diagnostics for debugging
+    avg_likelihood = torch.mean(log_p_w_given_v)
+    avg_kl = torch.mean(kl_div)
+    
+    # Print KL diagnostics during training
+    if torch.rand(1).item() < 0.1:  # Only print 10% of the time to reduce output
+        print(f"ELBO Diagnostics - Likelihood: {avg_likelihood:.4f}, KL Div: {avg_kl:.4f}")
 
     return torch.mean(elbo)
 
@@ -256,6 +284,7 @@ def prepare_data_for_radial_bins_3d(df, radial_bins=None):
 def pretrain_flow_3d(data, n_epochs=10, batch_size=256, lr=1e-3, weight_decay=1e-5):
     """
     Pretrain 3D flow model using maximum likelihood on data.
+    Enhanced with robust data cleaning and improved initialization.
 
     Parameters:
     -----------
@@ -277,10 +306,32 @@ def pretrain_flow_3d(data, n_epochs=10, batch_size=256, lr=1e-3, weight_decay=1e
     """
     # Ensure n_epochs is an integer
     n_epochs = int(n_epochs)
+    
+    # Clean data - handle outliers and NaN values
+    data_clean = data.copy()
+    
+    # Replace any NaN/Inf values with column means
+    for col in range(data.shape[1]):
+        col_data = data[:, col]
+        mask = np.isfinite(col_data)
+        if not np.all(mask):
+            print(f"WARNING: Found {np.sum(~mask)} non-finite values in column {col}")
+            # Replace with either column mean or reasonable default values
+            if np.any(mask):
+                col_mean = np.mean(col_data[mask])
+                data_clean[~mask, col] = col_mean
+            else:
+                data_clean[~mask, col] = 0.0  # Fallback if entire column is invalid
+    
+    # Drop extreme outliers (clip to reasonable ranges)
+    # For [log_age, Fe/H, Mg/Fe] with reasonable ranges
+    data_clean[:, 0] = np.clip(data_clean[:, 0], 0.0, 1.2)  # log age range
+    data_clean[:, 1] = np.clip(data_clean[:, 1], -2.0, 0.5)  # Fe/H range
+    data_clean[:, 2] = np.clip(data_clean[:, 2], -0.2, 0.5)  # Mg/Fe range
 
     # Scale data
     scaler = StandardScaler()
-    data_scaled = scaler.fit_transform(data)
+    data_scaled = scaler.fit_transform(data_clean)
 
     # Convert to tensors
     data_tensor = torch.tensor(data_scaled, dtype=torch.float32).to(device)
@@ -289,7 +340,7 @@ def pretrain_flow_3d(data, n_epochs=10, batch_size=256, lr=1e-3, weight_decay=1e
     dataset = TensorDataset(data_tensor)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    # Initialize flow model
+    # Initialize flow model with better default parameters for real data
     flow = Flow3D(
         n_transforms=12,
         hidden_dims=[128, 128],
@@ -297,13 +348,34 @@ def pretrain_flow_3d(data, n_epochs=10, batch_size=256, lr=1e-3, weight_decay=1e
         tail_bound=5.0,
     ).to(device)
 
-    # Optimizer
-    optimizer = optim.AdamW(flow.parameters(), lr=lr, weight_decay=weight_decay)
+    # Initialize parameters to prevent extreme initial values
+    def initialize_weights(m):
+        if isinstance(m, torch.nn.Linear):
+            # Use Xavier initialization for better initial distribution
+            torch.nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                torch.nn.init.zeros_(m.bias)
+    
+    # Apply initialization
+    flow.apply(initialize_weights)
+
+    # Optimizer with learning rate warmup and smaller initial LR
+    optimizer = optim.AdamW(flow.parameters(), lr=lr/10, weight_decay=weight_decay)
+    
+    # LR scheduler with warmup
+    def lr_warmup(epoch):
+        # Warmup for first few epochs, then constant
+        if epoch < 3:
+            return (epoch + 1) / 3
+        return 1.0
+    
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_warmup)
 
     # Training loop
-    train_stats = {"log_likelihood": [], "time": []}
+    train_stats = {"log_likelihood": [], "time": [], "lr": []}
 
-    print(f"Pretraining 3D flow on {len(data)} data points for {n_epochs} epochs")
+    print(f"Pretraining 3D flow on {len(data_clean)} data points for {n_epochs} epochs")
+    
     for epoch in range(n_epochs):
         flow.train()
         epoch_lls = []
@@ -325,17 +397,21 @@ def pretrain_flow_3d(data, n_epochs=10, batch_size=256, lr=1e-3, weight_decay=1e
 
             # Backward and optimize
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(flow.parameters(), 10.0)
+            torch.nn.utils.clip_grad_norm_(flow.parameters(), 5.0)  # Reduced clip threshold
             optimizer.step()
 
             epoch_lls.append(-loss.item())
             batch_progress.set_postfix({"LL": f"{-loss.item():.4f}"})
 
+        # Update learning rate
+        scheduler.step()
+        
         # Track stats
         avg_ll = np.mean(epoch_lls)
         train_stats["log_likelihood"].append(avg_ll)
+        train_stats["lr"].append(optimizer.param_groups[0]["lr"])
 
-        print(f"Pretraining Epoch {epoch+1}/{n_epochs}, Log-Likelihood: {avg_ll:.4f}")
+        print(f"Pretraining Epoch {epoch+1}/{n_epochs}, Log-Likelihood: {avg_ll:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}")
 
     print(
         f"Pretraining complete. Final Log-Likelihood: {train_stats['log_likelihood'][-1]:.4f}"
@@ -472,32 +548,75 @@ def train_3d_flow_with_uncertainty(
         recognition_net.train()
 
         epoch_elbo_values = []
+        epoch_kl_values = []
+        epoch_likelihood_values = []
+        
+        # Calculate beta for KL annealing
+        # Start with very small beta and gradually increase to 1.0
+        # This helps the model learn the likelihood first before optimizing the KL divergence
+        warmup_epochs = min(20, n_epochs // 2)
+        beta = min(1.0, (epoch + 1) / warmup_epochs * 0.5) 
+        if epoch == 0:
+            print(f"Starting KL annealing with beta={beta:.4f}")
 
         # Batch loop with progress bar
         batch_progress = tqdm(
-            loader, desc=f"Epoch {epoch+1}/{n_epochs}", leave=False, ncols=100
+            loader, desc=f"Epoch {epoch+1}/{n_epochs} (β={beta:.2f})", leave=False, ncols=100
         )
 
         for batch_data, batch_errors in batch_progress:
             optimizer.zero_grad()
+            
+            # Check for NaN or Inf values in data or errors
+            if torch.isnan(batch_data).any() or torch.isnan(batch_errors).any() or \
+               torch.isinf(batch_data).any() or torch.isinf(batch_errors).any():
+                print("WARNING: NaN or Inf values detected in batch data or errors!")
+                # Clean data and errors by replacing NaN/Inf with reasonable values
+                batch_data = torch.nan_to_num(batch_data, nan=0.0, posinf=1.0, neginf=-1.0)
+                batch_errors = torch.nan_to_num(batch_errors, nan=0.05, posinf=0.5, neginf=0.05)
+            
+            # Apply a minimum error floor to avoid numerical issues
+            batch_errors = torch.clamp(batch_errors, min=0.01)
 
-            # Calculate objective
+            # Calculate objective with current annealing parameter
             elbo = uncertainty_aware_elbo(
-                flow, recognition_net, batch_data, batch_errors, K=mc_samples
+                flow, recognition_net, batch_data, batch_errors, 
+                K=mc_samples, beta=beta
             )
             batch_elbo = elbo.item()
             epoch_elbo_values.append(batch_elbo)
+            
+            # Compute diagnostics for tracking
+            with torch.no_grad():
+                samples = recognition_net.sample(batch_data, batch_errors, n_samples=1)
+                log_p_v = flow.log_prob(samples).mean().item()
+                log_q_v_given_w = recognition_net.log_prob(
+                    samples, batch_data, batch_errors
+                ).mean().item()
+                log_p_w_given_v = compute_log_noise_pdf(
+                    batch_data, samples, batch_errors
+                ).mean().item()
+                
+                kl_div = log_q_v_given_w - log_p_v
+                epoch_kl_values.append(kl_div)
+                epoch_likelihood_values.append(log_p_w_given_v)
 
             # Backward pass
             loss = -elbo
             loss.backward()
+            
+            # Clip gradients to prevent exploding gradients
             torch.nn.utils.clip_grad_norm_(
                 list(flow.parameters()) + list(recognition_net.parameters()), 10.0
             )
             optimizer.step()
 
             # Update progress bar
-            batch_progress.set_postfix({"ELBO": f"{batch_elbo:.4f}"})
+            batch_progress.set_postfix({
+                "ELBO": f"{batch_elbo:.4f}", 
+                "KL": f"{kl_div:.4f}",
+                "LL": f"{log_p_w_given_v:.4f}"
+            })
 
         # Update learning rate
         scheduler.step()
