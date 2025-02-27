@@ -967,7 +967,7 @@ def parse_args():
     parser.add_argument(
         "--n_transforms",
         type=int,
-        default=8,
+        default=4,
         help="Number of transforms in the flow model",
     )
     parser.add_argument(
@@ -994,10 +994,10 @@ def parse_args():
         help="Number of epochs for flow pretraining",
     )
     parser.add_argument(
-        "--epochs", type=int, default=30, help="Number of epochs for full training"
+        "--epochs", type=int, default=10, help="Number of epochs for full training"
     )
     parser.add_argument(
-        "--batch_size", type=int, default=128, help="Batch size for training"
+        "--batch_size", type=int, default=64, help="Batch size for training"
     )
     parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
     parser.add_argument(

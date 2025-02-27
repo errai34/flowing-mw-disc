@@ -8,6 +8,7 @@ import seaborn as sns
 def generate_mock_stellar_data(n_samples=5000, random_seed=42):
     """
     Generate mock stellar data with artificially high errors for older stars.
+    Creates a bimodal age distribution with a clear starburst feature.
 
     Parameters:
     -----------
@@ -23,53 +24,78 @@ def generate_mock_stellar_data(n_samples=5000, random_seed=42):
     """
     np.random.seed(random_seed)
 
-    # Generate ages with a skewed distribution (more younger stars)
+    # Create a bimodal age distribution (younger peak + older starburst)
+    # First mode: younger stars (majority)
+    young_fraction = 0.6
+    young_stars = int(n_samples * young_fraction)
+    old_stars = n_samples - young_stars
+
     # Ages in log10 space (will be converted to Gyr in visualization)
-    # Tighter distribution with smaller scale
-    log_ages = np.random.normal(loc=0.8, scale=0.25, size=n_samples)
-    log_ages = np.clip(log_ages, 0, 1.3)  # Clip to ~1-20 Gyr range
+    # Younger population centered around 3-5 Gyr (log10 ~ 0.6)
+    young_log_ages = np.random.normal(loc=0.6, scale=0.15, size=young_stars)
+    young_log_ages = np.clip(young_log_ages, 0.3, 0.9)  # ~2-8 Gyr range
+
+    # Older starburst population centered around 11 Gyr (log10 ~ 1.04)
+    old_log_ages = np.random.normal(loc=1.04, scale=0.06, size=old_stars)
+    old_log_ages = np.clip(old_log_ages, 0.9, 1.2)  # ~8-16 Gyr range
+
+    # Combine the two populations
+    log_ages = np.concatenate([young_log_ages, old_log_ages])
+
+    # Shuffle the combined data to mix young and old stars
+    indices = np.arange(n_samples)
+    np.random.shuffle(indices)
+    log_ages = log_ages[indices]
 
     # Generate [Fe/H] with correlation to age
-    # Older stars tend to be more metal poor
-    feh_means = -0.5 + 0.7 * (1 - log_ages / 1.2)  # Scale to get proper correlation
-    # Tighter scatter for more coherent true data
-    feh_scatter = 0.15 + 0.08 * np.random.random(n_samples)
-    fehs = np.random.normal(loc=feh_means, scale=feh_scatter, size=n_samples)
-    fehs = np.clip(fehs, -1.0, 0.5)
+    # Create a distinct metallicity signature for the starburst
+    # First, baseline metallicity trend with age
+    feh_means = -0.5 + 0.7 * (
+        1 - log_ages / 1.2
+    )  # General trend: older = more metal poor
+
+    # Modify trend for starburst region (10-12 Gyr)
+    starburst_mask = (log_ages > 1.0) & (log_ages < 1.15)  # log10(10) to log10(12.5)
+    feh_means[starburst_mask] = -0.5 + np.random.normal(
+        0, 0.05, size=np.sum(starburst_mask)
+    )  # Tighter metallicity
+
+    # Add scatter around the trend (tighter for starburst)
+    feh_scatter = np.ones(n_samples) * 0.15  # Base scatter
+    feh_scatter[starburst_mask] = 0.08  # Reduced scatter for starburst
+
+    fehs = np.array(
+        [
+            np.random.normal(mean, scatter)
+            for mean, scatter in zip(feh_means, feh_scatter)
+        ]
+    )
+    fehs = np.clip(fehs, -1.0, 0.5)  # Reasonable range
 
     # Generate [Mg/Fe] with anti-correlation to [Fe/H]
     # Metal-poor stars tend to be more alpha-enhanced
     mgfe_means = 0.3 - 0.3 * (fehs + 1.5) / 2.0  # Scale to get proper anti-correlation
-    # Tighter scatter for Mg/Fe
-    mgfe_scatter = 0.04 + 0.02 * np.random.random(n_samples)
-    mgfes = np.random.normal(loc=mgfe_means, scale=mgfe_scatter, size=n_samples)
 
-    # Add bimodality to simulate thin/thick disk
-    bimodal_mask = np.random.random(n_samples) < 0.3
+    # Distinct alpha enhancement for starburst
+    mgfe_means[starburst_mask] += 0.1  # Make starburst stars more alpha-enhanced
+
+    # Add scatter (tighter for starburst)
+    mgfe_scatter = np.ones(n_samples) * 0.05  # Base scatter
+    mgfe_scatter[starburst_mask] = 0.03  # Reduced scatter for starburst
+
+    mgfes = np.array(
+        [
+            np.random.normal(mean, scatter)
+            for mean, scatter in zip(mgfe_means, mgfe_scatter)
+        ]
+    )
+
+    # Add thick/thin disk bimodality
+    bimodal_mask = (np.random.random(n_samples) < 0.3) & (
+        ~starburst_mask
+    )  # Only for non-starburst stars
     mgfes[bimodal_mask] += 0.15
     mgfes = np.clip(mgfes, -0.2, 0.5)
-
-    # Add starburst around 10-12 Gyr
-    # Convert 10-12 Gyr to log age: log10(10) ≈ 1, log10(12) ≈ 1.08
-    starburst_size = int(n_samples * 0.15)  # 15% of the stars in the starburst
-    starburst_indices = np.random.choice(n_samples, size=starburst_size, replace=False)
-
-    # Generate ages for starburst centered around 11 Gyr (log10(11) ≈ 1.04)
-    starburst_log_ages = np.random.normal(loc=1.04, scale=0.03, size=starburst_size)
-    starburst_log_ages = np.clip(starburst_log_ages, 1.0, 1.08)
-
-    # Generate metallicities for starburst - slightly more metal-rich than typical stars of this age
-    starburst_fehs = np.random.normal(loc=-0.4, scale=0.1, size=starburst_size)
-    starburst_fehs = np.clip(starburst_fehs, -0.6, -0.2)
-
-    # Generate Mg/Fe for starburst - moderately alpha-enhanced
-    starburst_mgfes = np.random.normal(loc=0.25, scale=0.05, size=starburst_size)
-    starburst_mgfes = np.clip(starburst_mgfes, 0.15, 0.35)
-
-    # Replace values for starburst stars
-    log_ages[starburst_indices] = starburst_log_ages
-    fehs[starburst_indices] = starburst_fehs
-    mgfes[starburst_indices] = starburst_mgfes
 
     # Stack the data
     true_data = np.column_stack([log_ages, fehs, mgfes])
@@ -78,15 +104,16 @@ def generate_mock_stellar_data(n_samples=5000, random_seed=42):
     # Convert log age to linear for computing errors
     ages = 10**log_ages
 
-    # Make errors EXTREMELY strongly dependent on age: much higher errors for older stars
-    # For log age: greatly increased coefficients for much noisier data
-    age_errors = 0.1 + 0.6 * (ages / 20.0) ** 2  # Stronger quadratic increase with age
+    # Make errors moderately dependent on age
+    # But reduce errors for starburst stars to help with detectability
+    age_errors = 0.05 + 0.2 * (ages / 20.0)  # More moderate increase with age
+    age_errors[starburst_mask] *= 0.8  # Less aggressive reduction for starburst stars
 
-    # For [Fe/H]: greatly increased age dependence and base error
-    feh_errors = 0.12 + 0.45 * (ages / 20.0) ** 2 + 0.07 * np.abs(fehs)
+    feh_errors = 0.08 + 0.15 * (ages / 20.0) + 0.03 * np.abs(fehs)
+    feh_errors[starburst_mask] *= 0.8  # Less aggressive reduction for starburst stars
 
-    # For [Mg/Fe]: greatly increased age dependence and base error
-    mgfe_errors = 0.08 + 0.25 * (ages / 20.0) ** 2 + 0.06 * np.abs(mgfes)
+    mgfe_errors = 0.05 + 0.1 * (ages / 20.0) + 0.03 * np.abs(mgfes)
+    mgfe_errors[starburst_mask] *= 0.8  # Less aggressive reduction for starburst stars
 
     errors = np.column_stack([age_errors, feh_errors, mgfe_errors])
 
@@ -110,7 +137,7 @@ def generate_mock_stellar_data(n_samples=5000, random_seed=42):
 
     # Create a metadata array to identify starburst stars (1 for starburst, 0 for regular)
     starburst_flag = np.zeros(n_samples)
-    starburst_flag[starburst_indices] = 1
+    starburst_flag[starburst_mask] = 1
 
     # Add the starburst flag as a 4th column to true_data for visualization purposes
     true_data_with_flag = np.column_stack([true_data, starburst_flag])
@@ -237,9 +264,16 @@ def visualize_mock_data(data, errors, true_data=None, output_dir="mock_data"):
         # Create KDE plots comparing true vs observed distributions
         plt.figure(figsize=(18, 6))
 
-        # KDE for log age
+        # KDE for log age - with clear bimodality
         plt.subplot(1, 3, 1)
-        sns.kdeplot(true_log_ages, color="blue", label="True", fill=True, alpha=0.3)
+        sns.kdeplot(
+            true_log_ages,
+            color="blue",
+            label="True",
+            fill=True,
+            alpha=0.3,
+            bw_adjust=0.5,
+        )
         sns.kdeplot(log_ages, color="red", label="Observed", fill=True, alpha=0.3)
         plt.xlabel("Log Age")
         plt.ylabel("Density")
@@ -285,8 +319,9 @@ def visualize_mock_data(data, errors, true_data=None, output_dir="mock_data"):
             cmap="Blues",
             fill=True,
             alpha=0.7,
-            levels=10,
+            levels=15,
             thresh=0.05,
+            bw_adjust=0.7,  # Sharper contours to highlight bimodality
         )
         plt.xlabel("Age (Gyr)")
         plt.ylabel("[Fe/H]")
@@ -348,7 +383,7 @@ def visualize_mock_data(data, errors, true_data=None, output_dir="mock_data"):
             plt.scatter(ages, fehs, s=5, alpha=0.5, color="gray")
             plt.xlabel("Age (Gyr)")
             plt.ylabel("[Fe/H]")
-            plt.title("Observed Data (Starburst Obscured by Noise)")
+            plt.title("Observed Data (Starburst Partially Obscured)")
             plt.xlim(20, 0)  # Reversed x-axis
             plt.ylim(-1.0, 0.5)
             plt.grid(True, alpha=0.3)
@@ -356,6 +391,60 @@ def visualize_mock_data(data, errors, true_data=None, output_dir="mock_data"):
             plt.tight_layout()
             plt.savefig(
                 os.path.join(output_dir, "starburst_visualization.png"), dpi=300
+            )
+            plt.close()
+
+            # Add histogram of ages to clearly show bimodality
+            plt.figure(figsize=(12, 6))
+
+            # Plot age histograms
+            plt.subplot(1, 2, 1)
+            plt.hist(true_ages, bins=40, alpha=0.6, color="blue", label="All Stars")
+            plt.hist(
+                true_ages[starburst_flag],
+                bins=15,
+                alpha=0.8,
+                color="red",
+                label="Starburst",
+            )
+            plt.xlabel("Age (Gyr)")
+            plt.ylabel("Count")
+            plt.title("True Age Distribution")
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+
+            # Plot noisy ages histogram
+            plt.subplot(1, 2, 2)
+            plt.hist(ages, bins=40, alpha=0.6, color="gray")
+            plt.xlabel("Age (Gyr)")
+            plt.ylabel("Count")
+            plt.title("Observed Age Distribution")
+            plt.grid(True, alpha=0.3)
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, "age_histograms.png"), dpi=300)
+            plt.close()
+
+            # Add bimodal age-metallicity visualization
+            plt.figure(figsize=(10, 8))
+
+            # Hexbin plot to show density in age-metallicity space
+            plt.hexbin(true_ages, true_fehs, gridsize=30, cmap="Blues", mincnt=1)
+            plt.colorbar(label="Density")
+
+            # Use direct kdeplot instead of custom KDE
+            sns.kdeplot(x=true_ages, y=true_fehs, color="red", levels=10, linewidths=1)
+
+            plt.xlabel("Age (Gyr)")
+            plt.ylabel("[Fe/H]")
+            plt.title("Age-Metallicity Bimodality")
+            plt.xlim(20, 0)  # Reversed x-axis
+            plt.ylim(-1.0, 0.5)
+            plt.grid(True, alpha=0.3)
+
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(output_dir, "age_metallicity_bimodality.png"), dpi=300
             )
             plt.close()
 
